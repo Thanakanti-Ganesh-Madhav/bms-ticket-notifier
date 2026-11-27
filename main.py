@@ -793,7 +793,96 @@ def run_check():
                 print(f"      {fmt_tag}{s.venue_name} — {s.time}{scr_attr}{highlight} — {cats}")
 
 
+def run_server(port, interval=60):
+    import http.server
+    import socketserver
+
+    server_status = {
+        "status": "initializing",
+        "last_check": None,
+        "total_checks": 0,
+        "last_error": None,
+    }
+
+    def background_worker():
+        time.sleep(1)
+        while True:
+            try:
+                print(f"\n[Worker] Running scheduled check at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}...")
+                run_check()
+                server_status["status"] = "healthy"
+                server_status["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                server_status["total_checks"] += 1
+                server_status["last_error"] = None
+            except Exception as e:
+                print(f"[Worker] Error during check: {e}")
+                server_status["last_error"] = str(e)
+            time.sleep(interval)
+
+    worker_thread = threading.Thread(target=background_worker, daemon=True)
+    worker_thread.start()
+
+    class HealthHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path in ("/", "/health", "/status"):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                resp = {
+                    "service": "bms-ticket-notifier",
+                    "status": server_status["status"],
+                    "last_check": server_status["last_check"],
+                    "total_checks": server_status["total_checks"],
+                    "last_error": server_status["last_error"],
+                    "interval_seconds": interval,
+                    "movies": ["Dune: Part Three", "Avengers: Doomsday"],
+                    "city": "Hyderabad",
+                    "priority_formats": ["IMAX", "Dolby Cinema", "Dolby Atmos"],
+                }
+                self.wfile.write(json.dumps(resp, indent=2).encode("utf-8"))
+            elif self.path == "/check":
+                try:
+                    run_check()
+                    server_status["last_check"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    server_status["total_checks"] += 1
+                    msg = "Check triggered and completed successfully."
+                    code = 200
+                except Exception as ex:
+                    msg = f"Check failed: {ex}"
+                    code = 500
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"message": msg}).encode("utf-8"))
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            sys.stdout.write(f"[HTTP] {self.address_string()} - {format % args}\n")
+
+    print("\n" + "=" * 68)
+    print(f"🚀 BMS TICKET NOTIFIER WEB SERVICE RUNNING ON PORT {port}")
+    print(f"   Health check: http://0.0.0.0:{port}/health")
+    print(f"   Background check interval: {interval} seconds")
+    print("=" * 68 + "\n")
+
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("0.0.0.0", port), HealthHandler) as httpd:
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nShutting down server.")
+
+
 def main():
+    port_env = os.getenv("PORT")
+    if port_env or "--server" in sys.argv:
+        port = int(port_env) if port_env else 10000
+        server_interval = int(os.getenv("CHECK_INTERVAL", "60"))
+        run_server(port, server_interval)
+        return
+
     watch_mode = "--watch" in sys.argv or "-w" in sys.argv or os.getenv("BMS_WATCH") == "1"
     fast_mode = "--fast" in sys.argv or "-f" in sys.argv
 
