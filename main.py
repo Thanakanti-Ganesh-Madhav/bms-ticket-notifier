@@ -484,8 +484,7 @@ def send_email(subject, changes, shows, movie_urls):
 
     if not api_key or not to:
         print("  ⚠️  Skipping email — RESEND_API_KEY or RESEND_TO_EMAIL not set.")
-        # Fine for local runs; in GitHub Actions email is the only alert.
-        return not os.getenv("GITHUB_ACTIONS")
+        return
 
     now_str = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
@@ -618,11 +617,10 @@ def send_email(subject, changes, shows, movie_urls):
         )
         if resp.status_code in (200, 201):
             print(f"  ✅ Email sent to {to}")
-            return True
-        print(f"  ❌ Resend {resp.status_code}: {resp.text}")
+        else:
+            print(f"  ❌ Resend {resp.status_code}: {resp.text}")
     except requests.RequestException as e:
         print(f"  ❌ Email failed: {e}")
-    return False
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -639,7 +637,6 @@ def sound_alert():
 
 
 def run_check():
-    """Run one check. Returns False if any fetch or the alert email failed."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now_str}] BMS Ticket Checker")
 
@@ -658,7 +655,6 @@ def run_check():
     all_shows = []
     all_dates = []
     monitored_movies = {}
-    failures = 0
 
     for url in url_list:
         parsed = parse_bms_url(url)
@@ -668,7 +664,6 @@ def run_check():
 
         if not event_code or not region_slug:
             print(f"  ❌ Invalid BMS_URL: {url}")
-            failures += 1
             continue
 
         region_code, region_slug_r, lat, lon, geohash = resolve_region(region_slug)
@@ -678,7 +673,6 @@ def run_check():
                                  region_code, region_slug_r, lat, lon, geohash)
         if not initial_data:
             print(f"  ⚠️  Could not fetch initial data for {event_code}")
-            failures += 1
             continue
 
         movie_info = parse_movie_info(initial_data)
@@ -716,15 +710,12 @@ def run_check():
             for dc in movie_dates:
                 data = fetch_bms(ev_code, dc, region_code, region_slug_r, lat, lon, geohash)
                 if not data:
-                    failures += 1
                     continue
                 all_shows.extend(parse_shows(data, format_name=fmt_name, movie_name=movie_name))
 
     if not all_shows:
         print("  ❌ No showtimes found.")
-        if failures:
-            print(f"  ❌ {failures} fetch(es) failed. State left untouched.")
-        return failures == 0
+        return
 
     # Apply filters
     filtered = filter_shows(
@@ -739,20 +730,12 @@ def run_check():
     new_state = build_state(filtered, all_dates)
     old_state = load_state()
 
-    if failures:
-        # Keep old entries for whatever could not be fetched, so they are
-        # not reported as new on the next successful run.
-        print(f"  ⚠️  {failures} fetch(es) failed; keeping previous data for them.")
-        new_state = {
-            k: {**old_state.get(k, {}), **new_state[k]}
-            for k in ("shows", "dates")
-        }
-
     changes = []
     if old_state:
         changes = detect_changes(old_state, new_state)
 
-    email_ok = True
+    save_state(new_state)
+
     if changes:
         priority_changes = [c for c in changes if is_priority_alert(c)]
 
@@ -778,13 +761,9 @@ def run_check():
             sound_alert()
             email_subj = f"BMS Alert: {', '.join(monitored_movies.keys())} - {len(changes)} change(s)"
 
-        email_ok = send_email(email_subj, changes, filtered, monitored_movies)
+        send_email(email_subj, changes, filtered, monitored_movies)
     else:
         print("  ✅ No changes since last check.")
-
-    # Save only once the alert is out, so a failed email is retried next run.
-    if email_ok:
-        save_state(new_state)
 
     # Group and print current status
     print(f"\n  Current show status ({len(filtered)} shows):")
@@ -812,8 +791,6 @@ def run_check():
                 elif "dolby" in full_text:
                     highlight = " ✨ [DOLBY]"
                 print(f"      {fmt_tag}{s.venue_name} — {s.time}{scr_attr}{highlight} — {cats}")
-
-    return email_ok and failures == 0
 
 
 def main():
@@ -851,14 +828,12 @@ def main():
                 print("\n👋 BMS Ticket Watcher stopped.")
                 break
     else:
-        ok = run_check()
+        run_check()
         print("\n" + "=" * 68)
         print("💡 TIP: For fastest IMAX & Dolby Cinema booking, run live watch mode:")
         print("   uv run main.py --watch --fast")
         print("   (Checks every 30 seconds & auto-launches your browser on drop)")
         print("=" * 68)
-        if not ok:
-            sys.exit(1)
 
 
 if __name__ == "__main__":
